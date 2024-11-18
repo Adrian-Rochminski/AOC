@@ -3,11 +3,14 @@ from PIL import Image as PILImage
 import random
 import importlib
 import matplotlib.pyplot as plt
-
+import numpy as np
 from Preprocessor import Preprocessor
+from SVMSegmentation import SVMSegmentation
 from Segmenter import Segmenter
 from Statistics import Statistics
-
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import cv2
 
 class ImageSegmentation:
     def __init__(self, data_loader: Any, class_names: List[Dict[str, Any]]):
@@ -55,11 +58,113 @@ class ImageSegmentation:
             self.processed_masks.append(processed_mask_array)
             self.statistics.increment_processed_images()
             for segmenter in self.segmenters:
-                result: PILImage.Image = segmenter.segment(processed_img_pil, processed_mask_array)
+                result: PILImage.Image = segmenter.segment(processed_img_pil)
                 if segmenter.class_name not in self.segmented_results:
                     self.segmented_results[segmenter.class_name] = []
                 self.segmented_results[segmenter.class_name].append(result)
                 self.statistics.add_segmentation_result(segmenter.class_name, result)
+                segmenter.display_segmentation_result(processed_img_pil, processed_mask_array, result)
+
+    # def svm_segmentation(self, num_of_images: int):
+    #     processed_img_array: Any = self.data_loader.images[:num_of_images]
+    #     processed_mask_array: Any = self.data_loader.masks[:num_of_images]
+    #     water_segmenter = SVMSegmentation(class_name="Water", class_index=8)
+    #     features, labels = water_segmenter.prepare_data_with_filters(processed_img_array, processed_mask_array)
+    #     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+    #     water_segmenter.train(X_train, y_train)
+    #     predictions = water_segmenter.predict(X_test)
+    #     print("Classification Report:")
+    #     print(classification_report(y_test, predictions.flatten()))
+    #     water_segmenter.evaluate(X_test, y_test, processed_img_array, processed_mask_array)
+    def resize_images_and_masks(self, images, masks, scale=0.5):
+        """
+        Resizes images and masks by a given scale.
+
+        Parameters:
+        - images: List of images (height x width x channels)
+        - masks: List of corresponding masks (height x width)
+        - scale: Scaling factor (e.g., 0.25 for 1/4th size)
+
+        Returns:
+        - resized_images: List of resized images
+        - resized_masks: List of resized masks
+        """
+        resized_images = []
+        resized_masks = []
+
+        print(f"Resizing images and masks by scale {scale}...")
+        for i, (img, mask) in enumerate(zip(images, masks)):
+            # Resize image
+            img_resized = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            # Resize mask
+            mask_resized = cv2.resize(mask, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+
+            resized_images.append(img_resized)
+            resized_masks.append(mask_resized)
+
+            print(f"Image {i + 1}: Original size {img.shape[:2]} -> Resized size {img_resized.shape[:2]}")
+
+        return resized_images, resized_masks
+
+    def filter_images_with_class(self, images, masks, class_index):
+        """
+        Filters images and masks to include only those where the mask contains the specified class index.
+
+        Parameters:
+        - images: List of images (height x width x channels)
+        - masks: List of corresponding masks (height x width)
+        - class_index: The class index to filter by (e.g., 8 for water)
+
+        Returns:
+        - filtered_images: List of images containing the specified class
+        - filtered_masks: List of corresponding masks
+        """
+        filtered_images = []
+        filtered_masks = []
+
+        print(f"Filtering images for class index {class_index}...")
+        for i, (img, mask) in enumerate(zip(images, masks)):
+            if np.any(mask == class_index):
+                filtered_images.append(img)
+                filtered_masks.append(mask)
+            else:
+                print(f"Image {i + 1} excluded: No pixels with class index {class_index}.")
+
+        print(f"Total filtered images: {len(filtered_images)}")
+        return filtered_images, filtered_masks
+
+    def svm_segmentation(self, num_of_images: int):
+        # Load images and masks
+        all_images = self.data_loader.images
+        all_masks = self.data_loader.masks
+
+        # Filter images and masks to include only those with the target class
+        filtered_images, filtered_masks = self.filter_images_with_class(all_images, all_masks, class_index=8)
+
+        # Filter images and masks to include only those with the target class
+        # Resize images and masks to 1/4th size
+        resized_images, resized_masks = self.resize_images_and_masks(filtered_images, filtered_masks, scale=0.5)
+
+        # Use only the first num_of_images after filtering and resizing
+        processed_img_array = resized_images[:num_of_images]
+        processed_mask_array = resized_masks[:num_of_images]
+
+        print(f"Using {len(processed_img_array)} images for segmentation.")
+
+        # Instantiate the SVMSegmentation for the "Water" class
+        water_segmenter = SVMSegmentation(class_name="Water", class_index=8)
+
+        # Prepare data
+        features, labels = water_segmenter.prepare_data_with_filters(processed_img_array, processed_mask_array)
+
+        # Split data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+
+        # Train the model
+        water_segmenter.train(X_train, y_train)
+
+        # Evaluate the model
+        water_segmenter.evaluate(X_test, y_test, processed_img_array, processed_mask_array)
 
     def display_statistics(self, num_examples: int = 5) -> None:
         stats: Dict[str, Any] = self.statistics.get_statistics()
@@ -87,3 +192,4 @@ class ImageSegmentation:
             axes[1].axis('off')
 
             plt.show()
+

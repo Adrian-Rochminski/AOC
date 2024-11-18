@@ -14,3 +14,6 @@ class Segmenter(ABC):
     @abstractmethod
     def apply_mask(self, image, mask):
         pass
+    @abstractmethod
+    def display_segmentation_result(self, image, mask, result):
+        pass
