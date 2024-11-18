@@ -1,13 +1,143 @@
 from typing import List, Dict, Any, Union, Optional
+
+import cv2
 from PIL import Image as PILImage
 import random
 import importlib
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 from Preprocessor import Preprocessor
 from Segmenter import Segmenter
 from Statistics import Statistics
 
+import numpy as np
+from matplotlib import pyplot as plt
+from thundersvm import SVC
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
+from skimage.color import rgb2gray
+
+
+
+class SVMSegmentation:
+    def __init__(self, class_name, class_index):
+        self.class_name = class_name
+        self.class_index = class_index
+        self.svm_model = SVC(probability=True, max_iter=10)#, kernel='linear')
+
+    def prepare_data1(self, images, masks):
+        features = []
+        labels = []
+        i = 0
+        for img, mask in zip(images, masks):
+            # Convert to grayscale for simplicity
+            gray_img = rgb2gray(np.array(img))
+
+            # Flatten the image and mask
+            img_flat = gray_img.flatten()
+            mask_flat = mask.flatten()
+
+            # Generate labels for the given class index
+            binary_labels = (mask_flat == self.class_index).astype(int)
+
+            features.append(img_flat)
+            labels.append(binary_labels)
+            print(i)
+            print(len(features))
+            print(len(labels))
+            i+=1
+        features = np.vstack(features)
+        labels = np.hstack(labels)
+        return features, labels
+
+    def preprocess(self, image):
+        gamma = 2.2
+        gamma_correction = np.array(255 * (image / 255) ** (1 / gamma), dtype='uint8')
+        pre_image = cv2.cvtColor(gamma_correction, cv2.COLOR_BGR2GRAY)
+        pre_image = cv2.resize(pre_image, None, fx=0.3, fy=0.3, interpolation=cv2.INTER_AREA)
+        pre_image = cv2.Laplacian(pre_image, cv2.CV_64F)
+        pre_image = cv2.equalizeHist(cv2.convertScaleAbs(pre_image))
+        return pre_image
+
+    def prepare_data(self, images, masks):
+        # Convert all images to grayscale and flatten
+        #images_array = [rgb2gray(np.array(img)).flatten() for img in images]
+        images_array = [self.preprocess(np.array(img)).flatten() for img in images]
+        images_flat = np.concatenate(images_array)  # Shape (n_images * n_pixels,)
+
+        # Flatten masks
+        masks_array = [cv2.resize(mask, None, fx=0.3, fy=0.3, interpolation=cv2.INTER_AREA).flatten() for mask in masks]
+        masks_flat = np.concatenate(masks_array)  # Shape (n_images * n_pixels,)
+
+        # Generate binary labels
+        binary_labels = (masks_flat == self.class_index).astype(int)  # Shape (n_samples,)
+
+        # Reshape features to have one column (since we have one feature per pixel)
+        features = images_flat.reshape(-1, 1)  # Shape (n_samples, n_features)
+
+        return features, binary_labels
+
+    def train(self, features, labels):
+        print("Training SVM...")
+        self.svm_model.fit(features, labels)
+        print("SVM training completed.")
+
+    def predict(self, images):
+        predictions = []
+        for img in images:
+            # Convert to grayscale
+            # gray_img = rgb2gray(np.array(img))
+            img_flat = img.flatten().reshape(1, -1)
+            prediction = self.svm_model.predict(img_flat)
+            predictions.append(prediction.reshape(img.shape))
+        return predictions
+
+    def evaluate(self, features, labels, test_images, test_masks):
+        print("Evaluating SVM...")
+        predictions = self.svm_model.predict(features)
+
+        # Generate classification report
+        print("Classification Report:")
+        print(classification_report(labels, predictions))
+
+        # Generate confusion matrix
+        cm = confusion_matrix(labels, predictions)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.title(f"Confusion Matrix for Class: {self.class_name}")
+        plt.xlabel("Predicted")
+        plt.ylabel("Actual")
+        plt.show()
+
+        # Show random results
+        self.visualize_results(test_images, test_masks, predictions)
+
+    def visualize_results(self, images, masks, predictions):
+        print("\nVisualizing results...")
+        num_examples = 5
+        indices = random.sample(range(len(images)), k=num_examples)
+
+        for idx in indices:
+            original_img = np.array(images[idx])
+            expected_mask = masks[idx]
+            predicted_mask = predictions[idx]
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            axes[0].imshow(original_img)
+            axes[0].set_title("Original Image")
+            axes[0].axis("off")
+
+            axes[1].imshow(expected_mask, cmap="gray")
+            axes[1].set_title("Expected Mask")
+            axes[1].axis("off")
+
+            print(np.array(predicted_mask).shape)
+            print(predicted_mask)
+            axes[2].imshow(np.array(predicted_mask), cmap="gray")
+            axes[2].set_title("Predicted Mask")
+            axes[2].axis("off")
+
+            plt.show()
 
 class ImageSegmentation:
     def __init__(self, data_loader: Any, class_names: List[Dict[str, Any]]):
@@ -87,3 +217,15 @@ class ImageSegmentation:
             axes[1].axis('off')
 
             plt.show()
+
+    def svm_segmentation(self, num_of_images: int):
+        processed_img_array: Any = self.data_loader.images[:num_of_images]
+        processed_mask_array: Any = self.data_loader.masks[:num_of_images]
+        water_segmenter = SVMSegmentation(class_name="Water", class_index=8)
+        features, labels = water_segmenter.prepare_data(processed_img_array, processed_mask_array)
+        X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+        water_segmenter.train(X_train, y_train)
+        predictions = water_segmenter.predict(X_test)
+        print("Classification Report:")
+        print(classification_report(y_test, np.array(predictions).flatten()))
+        water_segmenter.evaluate(X_test, y_test, processed_img_array, processed_mask_array)
