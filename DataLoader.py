@@ -7,12 +7,13 @@ from matplotlib import pyplot as plt
 
 
 class DataLoader:
-    def __init__(self, images_file='images/images.npy', masks_file='images/masks.npy'):
+    def __init__(self, images_file='images/images.npy', masks_file='images/masks.npy', class_merge_map=None):
         self.images_file = images_file
         self.masks_file = masks_file
         self.images = None
         self.masks = None
         self.selected_indices = []
+        self.class_merge_map = class_merge_map
 
     def load_data(self, mode='all'):
         self.images = np.load(self.images_file, mmap_mode='r')
@@ -51,7 +52,12 @@ class DataLoader:
             raise IndexError("Index out of bounds")
         actual_idx = self.selected_indices[idx]
         image = self.images[actual_idx]
-        mask = self.masks[actual_idx]
+        mask = self.masks[actual_idx].copy()
+
+        if self.class_merge_map:
+            for src_class, target_class in self.class_merge_map.items():
+                mask[mask == src_class] = target_class
+
         return image, mask
 
     def __len__(self):
