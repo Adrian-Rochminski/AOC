@@ -1,0 +1,29 @@
+{'C': 0.1, 'frequency': 0.1, 'n_orientations': 4}: 0.5
+{'C': 0.1, 'frequency': 0.1, 'n_orientations': 6}: 0.5
+{'C': 0.1, 'frequency': 0.1, 'n_orientations': 8}: 0.5
+{'C': 0.1, 'frequency': 0.2, 'n_orientations': 4}: 0.5882352941176471
+{'C': 0.1, 'frequency': 0.2, 'n_orientations': 6}: 0.5882352941176471
+{'C': 0.1, 'frequency': 0.2, 'n_orientations': 8}: 0.5882352941176471
+{'C': 0.1, 'frequency': 0.3, 'n_orientations': 4}: 0.5882352941176471
+{'C': 0.1, 'frequency': 0.3, 'n_orientations': 6}: 0.5882352941176471
+{'C': 0.1, 'frequency': 0.3, 'n_orientations': 8}: 0.5882352941176471
+{'C': 1, 'frequency': 0.1, 'n_orientations': 4}: 0.6176470588235294
+{'C': 1, 'frequency': 0.1, 'n_orientations': 6}: 0.6176470588235294
+{'C': 1, 'frequency': 0.1, 'n_orientations': 8}: 0.6176470588235294
+{'C': 1, 'frequency': 0.2, 'n_orientations': 4}: 0.5882352941176471
+{'C': 1, 'frequency': 0.2, 'n_orientations': 6}: 0.5882352941176471
+{'C': 1, 'frequency': 0.2, 'n_orientations': 8}: 0.5882352941176471
+{'C': 1, 'frequency': 0.3, 'n_orientations': 4}: 0.5882352941176471
+{'C': 1, 'frequency': 0.3, 'n_orientations': 6}: 0.5882352941176471
+{'C': 1, 'frequency': 0.3, 'n_orientations': 8}: 0.5882352941176471
+{'C': 10, 'frequency': 0.1, 'n_orientations': 4}: 0.6176470588235294
+{'C': 10, 'frequency': 0.1, 'n_orientations': 6}: 0.6470588235294118
+{'C': 10, 'frequency': 0.1, 'n_orientations': 8}: 0.6176470588235294
+{'C': 10, 'frequency': 0.2, 'n_orientations': 4}: 0.5882352941176471
+{'C': 10, 'frequency': 0.2, 'n_orientations': 6}: 0.5882352941176471
+{'C': 10, 'frequency': 0.2, 'n_orientations': 8}: 0.5882352941176471
+{'C': 10, 'frequency': 0.3, 'n_orientations': 4}: 0.5882352941176471
+{'C': 10, 'frequency': 0.3, 'n_orientations': 6}: 0.5882352941176471
+{'C': 10, 'frequency': 0.3, 'n_orientations': 8}: 0.5882352941176471
+Best parameters: {'C': 10, 'frequency': 0.1, 'n_orientations': 6}
+Best score: 0.65
