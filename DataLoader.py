@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 
 
 class DataLoader:
-    def __init__(self, images_file='images/images.npy', masks_file='images/masks.npy', class_merge_map=None):
+    def __init__(self, class_merge_map=None, images_file='images/images.npy', masks_file='images/masks.npy'):
         self.images_file = images_file
         self.masks_file = masks_file
         self.images = None
@@ -48,8 +48,8 @@ class DataLoader:
             plt.show()
 
     def get_image(self, idx):
-        if idx < 0 or idx >= len(self.selected_indices):
-            raise IndexError("Index out of bounds")
+        # if idx < 0 or idx >= len(self.selected_indices):
+        #     raise IndexError("Index out of bounds")
         actual_idx = self.selected_indices[idx]
         image = self.images[actual_idx]
         mask = self.masks[actual_idx].copy()
