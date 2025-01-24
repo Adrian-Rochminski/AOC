@@ -4,12 +4,11 @@ import random
 import importlib
 import matplotlib.pyplot as plt
 import numpy as np
+from skimage.segmentation import mark_boundaries, slic
 from Preprocessor import Preprocessor
-from SVMSegmentation import SVMSegmentation
+from SVMSegmentation import RandomForestSegmentationWithSuperpixels #GridSearchSVMSegmentationWithSuperpixels
 from Segmenter import Segmenter
 from Statistics import Statistics
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
 import cv2
 
 class ImageSegmentation:
@@ -54,49 +53,28 @@ class ImageSegmentation:
             processed_img_array: Any = self.preprocessor.center_crop_array(img_array, scale=scale)
             processed_mask_array: Any = self.preprocessor.center_crop_mask(mask_array, scale=scale)
             processed_img_pil: PILImage.Image = PILImage.fromarray(processed_img_array.astype('uint8'))
+
             self.processed_images.append(processed_img_pil)
             self.processed_masks.append(processed_mask_array)
             self.statistics.increment_processed_images()
+
             for segmenter in self.segmenters:
-                result: PILImage.Image = segmenter.segment(processed_img_pil)
+                result: PILImage.Image = segmenter.segment(processed_img_pil, processed_mask_array)
+
                 if segmenter.class_name not in self.segmented_results:
                     self.segmented_results[segmenter.class_name] = []
+
                 self.segmented_results[segmenter.class_name].append(result)
                 self.statistics.add_segmentation_result(segmenter.class_name, result)
                 segmenter.display_segmentation_result(processed_img_pil, processed_mask_array, result)
 
-    # def svm_segmentation(self, num_of_images: int):
-    #     processed_img_array: Any = self.data_loader.images[:num_of_images]
-    #     processed_mask_array: Any = self.data_loader.masks[:num_of_images]
-    #     water_segmenter = SVMSegmentation(class_name="Water", class_index=8)
-    #     features, labels = water_segmenter.prepare_data_with_filters(processed_img_array, processed_mask_array)
-    #     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
-    #     water_segmenter.train(X_train, y_train)
-    #     predictions = water_segmenter.predict(X_test)
-    #     print("Classification Report:")
-    #     print(classification_report(y_test, predictions.flatten()))
-    #     water_segmenter.evaluate(X_test, y_test, processed_img_array, processed_mask_array)
     def resize_images_and_masks(self, images, masks, scale=0.5):
-        """
-        Resizes images and masks by a given scale.
-
-        Parameters:
-        - images: List of images (height x width x channels)
-        - masks: List of corresponding masks (height x width)
-        - scale: Scaling factor (e.g., 0.25 for 1/4th size)
-
-        Returns:
-        - resized_images: List of resized images
-        - resized_masks: List of resized masks
-        """
         resized_images = []
         resized_masks = []
 
         print(f"Resizing images and masks by scale {scale}...")
         for i, (img, mask) in enumerate(zip(images, masks)):
-            # Resize image
             img_resized = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-            # Resize mask
             mask_resized = cv2.resize(mask, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
 
             resized_images.append(img_resized)
@@ -106,19 +84,7 @@ class ImageSegmentation:
 
         return resized_images, resized_masks
 
-    def filter_images_with_class(self, images, masks, class_index):
-        """
-        Filters images and masks to include only those where the mask contains the specified class index.
-
-        Parameters:
-        - images: List of images (height x width x channels)
-        - masks: List of corresponding masks (height x width)
-        - class_index: The class index to filter by (e.g., 8 for water)
-
-        Returns:
-        - filtered_images: List of images containing the specified class
-        - filtered_masks: List of corresponding masks
-        """
+    def filter_images_with_class1(self, images, masks, class_index):
         filtered_images = []
         filtered_masks = []
 
@@ -133,40 +99,79 @@ class ImageSegmentation:
         print(f"Total filtered images: {len(filtered_images)}")
         return filtered_images, filtered_masks
 
-    def svm_segmentation(self, num_of_images: int):
-        # Load images and masks
+
+
+    def filter_images_with_class(self, images, masks, class_indexes):
+        filtered_images = []
+        filtered_masks = []
+        for img, mask in zip(images, masks):
+            if np.any(np.isin(mask, class_indexes)):
+                filtered_images.append(img)
+                filtered_masks.append(mask)
+        return filtered_images, filtered_masks
+
+    def svm_segmentation_with_visualization(self, num_of_images: int, n_segments=100, compactness=10, max_iter=100):
         all_images = self.data_loader.images
         all_masks = self.data_loader.masks
 
-        # Filter images and masks to include only those with the target class
-        filtered_images, filtered_masks = self.filter_images_with_class(all_images, all_masks, class_index=8)
+        water_class_indexes = [8, 9, 13, 16]
+        mountainous_and_rocky = [6, 11, 14]
+        general_landforms = [5, 12, 15, 10]
 
-        # Filter images and masks to include only those with the target class
-        # Resize images and masks to 1/4th size
-        resized_images, resized_masks = self.resize_images_and_masks(filtered_images, filtered_masks, scale=0.5)
+        vegetation = [2, 4, 7]
+        choosen_group = vegetation
+        sky = [1]
 
-        # Use only the first num_of_images after filtering and resizing
+        optional_structures = [0, 3]
+
+        filtered_images, filtered_masks = self.filter_images_with_class(all_images, all_masks, class_indexes=choosen_group)
+        resized_images, resized_masks = self.resize_images_and_masks(filtered_images, filtered_masks, scale=1)
         processed_img_array = resized_images[:num_of_images]
         processed_mask_array = resized_masks[:num_of_images]
 
         print(f"Using {len(processed_img_array)} images for segmentation.")
+        print("Visualizing original images, masks, and superpixels...")
+        for idx in range(min(5, len(processed_img_array))):
+            img = processed_img_array[idx]
+            mask = processed_mask_array[idx]
 
-        # Instantiate the SVMSegmentation for the "Water" class
-        water_segmenter = SVMSegmentation(class_name="Water", class_index=8)
+            segments = slic(img, n_segments=n_segments, compactness=compactness, start_label=0)
 
-        # Prepare data
-        features, labels = water_segmenter.prepare_data_with_filters(processed_img_array, processed_mask_array)
+            gt_mask = np.isin(mask, choosen_group)
 
-        # Split data into training and testing sets
-        X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+            axs[0].imshow(img)
+            axs[0].set_title('Original Image')
+            axs[0].axis('off')
 
-        # Train the model
-        water_segmenter.train(X_train, y_train)
+            axs[1].imshow(gt_mask, cmap='gray')
+            axs[1].set_title('Ground Truth Mask (vegetation Group)')
+            axs[1].axis('off')
 
-        # Evaluate the model
-        water_segmenter.evaluate(X_test, y_test, processed_img_array, processed_mask_array)
+            axs[2].imshow(mark_boundaries(img, segments))
+            axs[2].set_title(f'Superpixels (n_segments={n_segments})')
+            axs[2].axis('off')
 
-    def display_statistics(self, num_examples: int = 5) -> None:
+            plt.show()
+
+        segmenter = RandomForestSegmentationWithSuperpixels(class_name="vegetationGroup", class_indexes=choosen_group)
+
+        features, labels = segmenter.prepare_data_with_superpixels(
+            processed_img_array, processed_mask_array, n_segments=n_segments, compactness=compactness, augment=True
+        )
+
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(
+            features, labels, test_size=0.2, random_state=42
+        )
+
+        segmenter.train(X_train, y_train)
+
+        segmenter.evaluate(
+            X_test, y_test, processed_img_array, processed_mask_array, n_segments=n_segments, compactness=compactness
+        )
+
+    def display_statistics(self, num_examples: int = 5):
         stats: Dict[str, Any] = self.statistics.get_statistics()
         print("Statistics:")
         print(f"Total images: {stats['total_images']}")
