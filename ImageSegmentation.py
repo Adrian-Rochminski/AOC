@@ -1,200 +1,204 @@
-from typing import List, Dict, Any, Union, Optional
-from PIL import Image as PILImage
-import random
-import importlib
-import matplotlib.pyplot as plt
+import os
+import pathlib
+from typing import Any
 import numpy as np
-from skimage.segmentation import mark_boundaries, slic
-from Preprocessor import Preprocessor
-from SVMSegmentation import RandomForestSegmentationWithSuperpixels #GridSearchSVMSegmentationWithSuperpixels
-from Segmenter import Segmenter
-from Statistics import Statistics
+from skimage.color import rgb2gray
+from skimage.util import img_as_float
+from sklearn.exceptions import NotFittedError
+from sklearn.metrics import jaccard_score, accuracy_score, confusion_matrix, classification_report
+from sklearn.model_selection import train_test_split
+from skimage.segmentation import slic
+import matplotlib.pyplot as plt
 import cv2
 
+from DataLoader import DataLoader
+from FeaturesDataLoader import FeaturesDataloader
+from SingleClassSegmenter import SingleClassSegmenter
+
+CLASSES = ["water", "rocky", "land", "vegetation", "sky", "structures"]
+
 class ImageSegmentation:
-    def __init__(self, data_loader: Any, class_names: List[Dict[str, Any]]):
-        self.data_loader: Any = data_loader
-        self.preprocessor: Preprocessor = Preprocessor()
-        self.statistics: Statistics = Statistics()
-        self.class_names: List[Dict[str, Any]] = class_names
-        self.segmenters: List[Segmenter] = []
-        self.processed_images: List[PILImage.Image] = []
-        self.processed_masks: List[Any] = []
-        self.segmented_results: Dict[str, List[PILImage.Image]] = {}
+    def __init__(self, dataloader : DataLoader):
+        self.dataloader = dataloader
+        self.classifiers: {str, SingleClassSegmenter} = {}
+        self.features_dataloader = FeaturesDataloader()
 
-    def select_classes(self, class_names_to_analyze: List[str], segmenter_folder: str = "segmenters") -> None:
-        for class_name in class_names_to_analyze:
-            class_info: Optional[Dict[str, Any]] = next(
-                (c for c in self.class_names if c['name'].lower() == class_name.lower()), None)
-            if class_info is None:
-                raise ValueError(f"Class '{class_name}' not found in class names.")
+    def preprocess_data(self, scale: float = 0.5) -> None:
+        self.features_dataloader.build(
+            dataloader=self.dataloader,
+            scale=scale
+        )
 
-            module_name: str = f"{segmenter_folder}.{class_name}_segmenter"
-            segmenter_class_name: str = f"{class_name}Segmenter"
+    def train_classifiers(self, test_size: float = 0.2) -> None:
+        print("\nTraining classifiers for all class groups:")
+        for class_idx, class_name in enumerate(CLASSES):
+            print(f"\nTraining {class_name} classifier...")
 
             try:
-                module = importlib.import_module(module_name)
-                segmenter_class = getattr(module, segmenter_class_name)
-            except (ModuleNotFoundError, AttributeError) as e:
-                raise ValueError(f"No segmenter class found for '{class_name}'. Error: {e}")
+                features, labels = self.features_dataloader.get_class_data(class_idx)
+            except ValueError as e:
+                print(f"Skipping {class_name}: {e}")
+                continue
 
-            segmenter_instance: Segmenter = segmenter_class(class_info)
-            self.segmenters.append(segmenter_instance)
-            print(f"Selected class '{class_info['name']}' with class index {class_info['classIndex']}")
+            if len(features) == 0:
+                print(f"No data for {class_name}, skipping.")
+                continue
 
-    def load_data(self, mode: Union[str, int] = 'all') -> None:
-        self.data_loader.load_data(mode=mode)
-        self.statistics.update_total_images(len(self.data_loader))
+            X_train, X_test, y_train, y_test = train_test_split(
+                features, labels, test_size=test_size, random_state=42
+            )
 
-    def process_data(self, scale: float = 0.5) -> None:
-        if not self.segmenters:
-            raise ValueError("No classes selected for segmentation. Use select_classes() to choose classes.")
-        for idx, (img_array, mask_array) in enumerate(self.data_loader):
-            processed_img_array: Any = self.preprocessor.center_crop_array(img_array, scale=scale)
-            processed_mask_array: Any = self.preprocessor.center_crop_mask(mask_array, scale=scale)
-            processed_img_pil: PILImage.Image = PILImage.fromarray(processed_img_array.astype('uint8'))
+            classifier = SingleClassSegmenter(class_idx)
+            classifier.train(X_train, y_train)
+            self.classifiers[class_name] = classifier
+            print(f"Trained {class_name} classifier with {len(X_train)} samples")
 
-            self.processed_images.append(processed_img_pil)
-            self.processed_masks.append(processed_mask_array)
-            self.statistics.increment_processed_images()
+    def predict_multi_class(self, img: np.ndarray, probability_threshold: float = 0.5) -> dict:
+        img_float = img_as_float(img)
+        segments = slic(img_float, n_segments=100, compactness=10)
+        gabor_responses = self.features_dataloader.precompute_gabor_responses(rgb2gray(img))
+        unique_segments = np.unique(segments)
 
-            for segmenter in self.segmenters:
-                result: PILImage.Image = segmenter.segment(processed_img_pil, processed_mask_array)
+        features = []
+        valid_segment_ids = []
+        for seg_id in unique_segments:
+            feat = self.features_dataloader.extract_superpixel_features(img_float, segments, seg_id, gabor_responses)
+            features.append(feat)
+            valid_segment_ids.append(seg_id)
 
-                if segmenter.class_name not in self.segmented_results:
-                    self.segmented_results[segmenter.class_name] = []
+        features = np.array(features)
+        features = self.features_dataloader.normalize_new_features(features)
 
-                self.segmented_results[segmenter.class_name].append(result)
-                self.statistics.add_segmentation_result(segmenter.class_name, result)
-                segmenter.display_segmentation_result(processed_img_pil, processed_mask_array, result)
+        probabilities = {}
+        for name, classifier in self.classifiers.items():
+            try:
+                proba = classifier.predict_proba(features)[:, 1]
+                probabilities[name] = dict(zip(valid_segment_ids, proba))
+            except NotFittedError:
+                probabilities[name] = {seg_id: 0.0 for seg_id in valid_segment_ids}
 
-    def resize_images_and_masks(self, images, masks, scale=0.5):
-        resized_images = []
-        resized_masks = []
+        combined_mask = np.zeros_like(segments, dtype=int)
+        for seg_id in unique_segments:
+            class_probs = []
+            for class_name in CLASSES:
+                prob = probabilities[class_name].get(seg_id, 0.0)
+                class_probs.append((class_name, prob))
 
-        print(f"Resizing images and masks by scale {scale}...")
-        for i, (img, mask) in enumerate(zip(images, masks)):
-            img_resized = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-            mask_resized = cv2.resize(mask, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+            max_class, max_prob = max(class_probs, key=lambda x: x[1])
+            if max_prob >= probability_threshold:
+                combined_mask[segments == seg_id] = CLASSES.index(max_class) + 1
 
-            resized_images.append(img_resized)
-            resized_masks.append(mask_resized)
+        return {
+            'combined': combined_mask,
+            'probabilities': probabilities,
+            'segments': segments
+        }
 
-            print(f"Image {i + 1}: Original size {img.shape[:2]} -> Resized size {img_resized.shape[:2]}")
+    def _postprocess_mask(self, predictions: np.ndarray, segments: np.ndarray) -> np.ndarray:
+        mask = np.zeros_like(segments, dtype=int)
+        for seg_id, pred in enumerate(predictions):
+            mask[segments == seg_id] = pred
 
-        return resized_images, resized_masks
+        return self.classifiers['vegetation'].remove_isolated_predicted_segments(segments, mask)
 
-    def filter_images_with_class1(self, images, masks, class_index):
-        filtered_images = []
-        filtered_masks = []
+    def _get_superpixel_adjacency(self, segments: np.ndarray) -> {int, set}:
+        adjacency = {}
+        height, width = segments.shape
 
-        print(f"Filtering images for class index {class_index}...")
-        for i, (img, mask) in enumerate(zip(images, masks)):
-            if np.any(mask == class_index):
-                filtered_images.append(img)
-                filtered_masks.append(mask)
-            else:
-                print(f"Image {i + 1} excluded: No pixels with class index {class_index}.")
+        for y in range(height):
+            for x in range(width):
+                current = segments[y, x]
+                if current not in adjacency:
+                    adjacency[current] = set()
 
-        print(f"Total filtered images: {len(filtered_images)}")
-        return filtered_images, filtered_masks
+                if x + 1 < width and (right := segments[y, x + 1]) != current:
+                    adjacency[current].add(right)
+                    adjacency.setdefault(right, set()).add(current)
 
+                if y + 1 < height and (bottom := segments[y + 1, x]) != current:
+                    adjacency[current].add(bottom)
+                    adjacency.setdefault(bottom, set()).add(current)
 
+        return adjacency
 
-    def filter_images_with_class(self, images, masks, class_indexes):
-        filtered_images = []
-        filtered_masks = []
-        for img, mask in zip(images, masks):
-            if np.any(np.isin(mask, class_indexes)):
-                filtered_images.append(img)
-                filtered_masks.append(mask)
-        return filtered_images, filtered_masks
+    def _remove_isolated_segments(self, segments: np.ndarray, pred_mask: np.ndarray) -> np.ndarray:
+        adjacency = self._get_superpixel_adjacency(segments)
+        refined_mask = pred_mask.copy()
+        seg_labels = {seg: int(np.any(pred_mask[segments == seg])) for seg in np.unique(segments)}
 
-    def svm_segmentation_with_visualization(self, num_of_images: int, n_segments=100, compactness=10, max_iter=100):
-        all_images = self.data_loader.images
-        all_masks = self.data_loader.masks
+        for seg_id, label in seg_labels.items():
+            if label and not any(seg_labels[n] for n in adjacency[seg_id]):
+                refined_mask[segments == seg_id] = 0
 
-        water_class_indexes = [8, 9, 13, 16]
-        mountainous_and_rocky = [6, 11, 14]
-        general_landforms = [5, 12, 15, 10]
+        return refined_mask
 
-        vegetation = [2, 4, 7]
-        choosen_group = vegetation
-        sky = [1]
+    def evaluate_multi_class(self, dataloader: DataLoader) -> {str, Any}:
+        all_preds = []
+        all_gts = []
 
-        optional_structures = [0, 3]
+        for img, true_mask in dataloader:
+            results = self.predict_multi_class(img)
+            pred_mask = results['combined']
+            gt_resized = cv2.resize(true_mask, pred_mask.shape[::-1],
+                                    interpolation=cv2.INTER_NEAREST)
 
-        filtered_images, filtered_masks = self.filter_images_with_class(all_images, all_masks, class_indexes=choosen_group)
-        resized_images, resized_masks = self.resize_images_and_masks(filtered_images, filtered_masks, scale=1)
-        processed_img_array = resized_images[:num_of_images]
-        processed_mask_array = resized_masks[:num_of_images]
+            all_preds.append(pred_mask.flatten())
+            all_gts.append(gt_resized.flatten())
 
-        print(f"Using {len(processed_img_array)} images for segmentation.")
-        print("Visualizing original images, masks, and superpixels...")
-        for idx in range(min(5, len(processed_img_array))):
-            img = processed_img_array[idx]
-            mask = processed_mask_array[idx]
+        y_pred = np.concatenate(all_preds)
+        y_true = np.concatenate(all_gts)
 
-            segments = slic(img, n_segments=n_segments, compactness=compactness, start_label=0)
+        metrics = {
+            'overall_accuracy': accuracy_score(y_true, y_pred),
+            'per_class_iou': jaccard_score(y_true, y_pred, average=None),
+            'confusion_matrix': confusion_matrix(y_true, y_pred),
+            # 'classification_report': classification_report(y_true, y_pred, target_names=CLASSES)
+        }
 
-            gt_mask = np.isin(mask, choosen_group)
+        return metrics
 
-            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-            axs[0].imshow(img)
-            axs[0].set_title('Original Image')
-            axs[0].axis('off')
+    def save_classifiers(self, dir: str = "classifiers") -> None:
+        for name, segmenter in self.classifiers.items():
+            path = f'{dir}/{name}.pkl'
+            segmenter.save(path)
+        self.features_dataloader.save_normalization_params(f'{dir}/normalization_params.pkl')
+        print(f"Saved all classifiers to {dir}")
 
-            axs[1].imshow(gt_mask, cmap='gray')
-            axs[1].set_title('Ground Truth Mask (vegetation Group)')
-            axs[1].axis('off')
+    def load_classifiers(self, dir: str = "classifiers") -> None:
+        self.features_dataloader.load_normalization_params(f'{dir}/normalization_params.pkl')
+        for class_index, class_name in enumerate(CLASSES):
+            path = f'{dir}/{class_name}.pkl'
+            try:
+                self.classifiers[class_name] = SingleClassSegmenter(class_index).load(path)
+            except FileNotFoundError:
+                print(f"Warning: Classifier for {class_name} not found")
+        print(f"Loaded {len(self.classifiers)} classifiers")
 
-            axs[2].imshow(mark_boundaries(img, segments))
-            axs[2].set_title(f'Superpixels (n_segments={n_segments})')
-            axs[2].axis('off')
+    def visualize_results(self, img: np.ndarray, results: {str, np.ndarray},
+                          ground_truth: np.ndarray = None) -> None:
+        fig = plt.figure(figsize=(20, 10))
 
-            plt.show()
+        ax1 = fig.add_subplot(241)
+        ax1.imshow(img)
+        ax1.set_title('Original Image')
 
-        segmenter = RandomForestSegmentationWithSuperpixels(class_name="vegetationGroup", class_indexes=choosen_group)
+        if ground_truth is not None:
+            ax2 = fig.add_subplot(242)
+            ax2.imshow(ground_truth)
+            ax2.set_title('Ground Truth')
 
-        features, labels = segmenter.prepare_data_with_superpixels(
-            processed_img_array, processed_mask_array, n_segments=n_segments, compactness=compactness, augment=True
-        )
+        ax3 = fig.add_subplot(243)
+        ax3.imshow(results['combined'])
+        ax3.set_title('Combined Prediction')
 
-        from sklearn.model_selection import train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(
-            features, labels, test_size=0.2, random_state=42
-        )
+        for idx, (name, probs) in enumerate(results['probabilities'].items()):
+            ax = fig.add_subplot(2, 4, idx + 4)
+            prob_map = np.zeros_like(results['segments'], dtype=np.float32)
+            for seg_id in np.unique(results['segments']):
+                prob_map[results['segments'] == seg_id] = probs[seg_id]
+            ax.imshow(prob_map, cmap='hot', vmin=0, vmax=1)
+            ax.set_title(f'{name} Probability')
+            plt.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04)
 
-        segmenter.train(X_train, y_train)
-
-        segmenter.evaluate(
-            X_test, y_test, processed_img_array, processed_mask_array, n_segments=n_segments, compactness=compactness
-        )
-
-    def display_statistics(self, num_examples: int = 5):
-        stats: Dict[str, Any] = self.statistics.get_statistics()
-        print("Statistics:")
-        print(f"Total images: {stats['total_images']}")
-        print(f"Processed images: {stats['processed_images']}")
-        for class_name, results in stats['segmentation_results'].items():
-            print(f"Segmented with {class_name}: {len(results)} images")
-
-        print(f"\nDisplaying {num_examples} random examples of images, masks, and segmented results:")
-        num_examples = min(num_examples, len(self.processed_images))
-        random_indices: List[int] = random.sample(range(len(self.processed_images)), num_examples)
-
-        for idx in random_indices:
-            img: PILImage.Image = self.processed_images[idx]
-            mask: Any = self.processed_masks[idx]
-
-            num_cols: int = 2 + len(self.segmenters)
-            fig, axes = plt.subplots(1, num_cols, figsize=(5 * num_cols, 5))
-            axes[0].imshow(img)
-            axes[0].set_title('Processed Image')
-            axes[0].axis('off')
-            axes[1].imshow(mask, cmap='gray')
-            axes[1].set_title('Processed Mask')
-            axes[1].axis('off')
-
-            plt.show()
-
+        plt.tight_layout()
+        plt.show()
