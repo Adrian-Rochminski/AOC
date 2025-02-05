@@ -5,6 +5,14 @@ import random
 
 from matplotlib import pyplot as plt
 
+CLASS_GROUPS = {
+    "water": [8, 9, 13, 16],
+    "rocky": [6, 11, 14],
+    "land": [5, 12, 15, 10],
+    "vegetation": [2, 4, 7],
+    "sky": [1],
+    "structures": [0, 3]
+}
 
 class DataLoader:
     def __init__(self, images_file='images/images.npy', masks_file='images/masks.npy'):
@@ -13,10 +21,15 @@ class DataLoader:
         self.images = None
         self.masks = None
         self.selected_indices = []
+        self.class_map = {}
+        for group_id, (group_name, class_ids) in enumerate(CLASS_GROUPS.items()):
+            for value in class_ids:
+                self.class_map[value] = group_id
 
     def load_data(self, mode='all'):
         self.images = np.load(self.images_file, mmap_mode='r')
-        self.masks = np.load(self.masks_file, mmap_mode='r')
+        masks = np.load(self.masks_file, mmap_mode='r')
+        self.masks = [self.convert_mask(m) for m in masks]
 
         total_images = self.images.shape[0]
         indices = list(range(total_images))
@@ -31,6 +44,12 @@ class DataLoader:
             self.selected_indices = indices[:mode]
         else:
             raise ValueError("Invalid mode. Use 'all', 'half', 'quarter', or an integer number of images.")
+
+    def convert_mask(self, mask):
+        converted_mask = np.copy(mask)
+        for orig_value, group_id in self.class_map.items():
+            converted_mask[mask == orig_value] = group_id
+        return converted_mask
 
     def display_random_images_with_masks(self, num_examples=5):
         num_examples = min(num_examples, len(self.images))
@@ -52,7 +71,9 @@ class DataLoader:
         actual_idx = self.selected_indices[idx]
         image = self.images[actual_idx]
         mask = self.masks[actual_idx]
-        return image, mask
+        converted_mask = self.convert_mask(mask)
+        image_float = image.astype(np.float32) / 255.0
+        return image_float, converted_mask
 
     def __len__(self):
         return len(self.selected_indices)

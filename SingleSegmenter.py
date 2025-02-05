@@ -1,7 +1,13 @@
+import pickle
+
+import cv2
+from skimage.measure import ransac
+from sqlalchemy.sql.functions import random
+from tqdm import tqdm
 import numpy as np
 from skimage.segmentation import slic
 from skimage.color import rgb2gray
-from skimage.util import img_as_float
+from skimage.util import img_as_float, img_as_ubyte
 from skimage.feature import local_binary_pattern
 from skimage.filters import sobel
 from sklearn.ensemble import RandomForestClassifier
@@ -10,15 +16,15 @@ import matplotlib.pyplot as plt
 from imgaug import augmenters as iaa
 
 
-class RandomForestSegmentationWithSuperpixels:
+class SingleSegmenter:
     def __init__(self, class_name, class_indexes):
         self.class_name = class_name
         self.class_indexes = class_indexes
-        self.clf = RandomForestClassifier(
-            n_estimators=2000, class_weight='balanced_subsample', max_depth=30
+        self.model = RandomForestClassifier(
+            n_estimators=1000, class_weight='balanced_subsample', max_depth=30
         )
         print(
-            f"Initialized RandomForestSegmentationWithSuperpixels for class group '{class_name}' with indexes {class_indexes}.")
+            f"Initialized SingleSegmenter for class group '{class_name}' with indexes {class_indexes}.")
 
     def extract_superpixel_features(self, img, segments, superpixel_id):
         mask_segment = segments == superpixel_id
@@ -27,7 +33,7 @@ class RandomForestSegmentationWithSuperpixels:
             gray_img = rgb2gray(img)
         else:
             gray_img = img
-        lbp = local_binary_pattern(gray_img, P=8, R=1, method="uniform")
+        lbp = local_binary_pattern(img_as_ubyte(gray_img), P=8, R=1, method="uniform")
         lbp_hist = np.histogram(lbp[mask_segment], bins=np.arange(0, 11), density=True)[0]
         edge_map = sobel(gray_img)
         edge_density = edge_map[mask_segment].mean()
@@ -62,26 +68,34 @@ class RandomForestSegmentationWithSuperpixels:
 
         return augmented_images, augmented_masks
 
-    def prepare_data_with_superpixels(self, images, masks, n_segments=100, compactness=10, augment=True):
-        if augment:
-            print("Applying data augmentation...")
-            images, masks = self.augment_data(images, masks)
-        else:
-            print("Data augmentation not applied.")
+    def equalize_hist(self, image):
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        lab[:, :, 0] = cv2.equalizeHist(lab[:, :, 0])
+        equalized = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        return equalized
+
+    def prepare_data_with_superpixels(self, images, masks, n_segments=100, compactness=5, augment=True):
+        # if augment:
+        #     print("Applying data augmentation...")
+        #     images, masks = self.augment_data(images, masks)
+        # else:
+        #     print("Data augmentation not applied.")
 
         features_list = []
         labels_list = []
         print(f"Preparing data with superpixels for {len(images)} images and masks.")
 
-        for idx, (img, mask) in enumerate(zip(images, masks)):
-            print(f"Processing image {idx + 1}/{len(images)}...")
+        for idx, (img, mask) in tqdm(enumerate(zip(images, masks))):
+            # print(f"Processing image {idx + 1}/{len(images)}...")
+            img = self.equalize_hist(img)
             img = img_as_float(img)
-
             segments = slic(img, n_segments=n_segments, compactness=compactness, start_label=0)
             unique_segments = np.unique(segments)
-            print(f"  Number of superpixels: {len(unique_segments)}")
+            # print(f"  Number of superpixels: {len(unique_segments)}")
 
             for segment_id in unique_segments:
+                if np.random.random() > 0.6:
+                    continue
                 feature_vector = self.extract_superpixel_features(img, segments, segment_id)
                 features_list.append(feature_vector)
                 mask_segment = segments == segment_id
@@ -96,11 +110,14 @@ class RandomForestSegmentationWithSuperpixels:
         return features, labels
 
     def train(self, X_train, y_train):
-        self.clf.fit(X_train, y_train)
+        self.model.fit(X_train, y_train)
 
     def predict(self, X_test):
-        predictions = self.clf.predict(X_test)
+        predictions = self.model.predict(X_test)
         return predictions
+
+    def predict_proba(self, X_test) :
+        return self.model.predict_proba(X_test)
 
     def calculate_jaccard_index(self, gt_mask, pred_mask):
         gt_mask_int = gt_mask.astype(int).ravel()
@@ -150,7 +167,7 @@ class RandomForestSegmentationWithSuperpixels:
 
         return refined_pred_mask
 
-    def evaluate(self, X_test, y_test, test_images, test_masks, n_segments=100, compactness=10, remove_isolated=True):
+    def evaluate(self, X_test, y_test, test_images, test_masks, n_segments=100, compactness=5, remove_isolated=True):
         print("Starting evaluation...")
         predictions = self.predict(X_test)
         print("Classification Report:")
@@ -160,7 +177,9 @@ class RandomForestSegmentationWithSuperpixels:
         print(cm)
         print(f"Visualizing predictions and computing Jaccard index for {len(test_images)} images.")
         jaccard_scores = []
+        i = 10
         for idx, img in enumerate(test_images):
+            img = self.equalize_hist(img)
             img = img_as_float(img)
             segments = slic(img, n_segments=n_segments, compactness=compactness, start_label=0)
             unique_segments = np.unique(segments)
@@ -179,19 +198,31 @@ class RandomForestSegmentationWithSuperpixels:
             pred_mask = predicted_mask.astype(bool)
             jaccard_index = self.calculate_jaccard_index(gt_mask, pred_mask)
             jaccard_scores.append(jaccard_index)
-            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-            axs[0].imshow(img)
-            axs[0].set_title('Original Image')
-            axs[0].axis('off')
 
-            axs[1].imshow(gt_mask, cmap='gray')
-            axs[1].set_title(f'Ground Truth Mask ({self.class_name})')
-            axs[1].axis('off')
+            if i >= 0:
+                fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+                axs[0].imshow(img)
+                axs[0].set_title('Original Image')
+                axs[0].axis('off')
 
-            axs[2].imshow(pred_mask, cmap='gray')
-            axs[2].set_title(f'Predicted Mask ({self.class_name})\nJaccard: {jaccard_index:.4f}')
-            axs[2].axis('off')
-            plt.show()
+                axs[1].imshow(gt_mask, cmap='gray')
+                axs[1].set_title(f'Ground Truth Mask ({self.class_name})')
+                axs[1].axis('off')
+
+                axs[2].imshow(pred_mask, cmap='gray')
+                axs[2].set_title(f'Predicted Mask ({self.class_name})\nJaccard: {jaccard_index:.4f}')
+                axs[2].axis('off')
+                plt.show()
+            i -= 1
         mean_jaccard = np.mean(jaccard_scores) if jaccard_scores else 0.0
         print(f"Mean Jaccard Index (IoU) across test images: {mean_jaccard:.4f}")
         print("Evaluation completed.")
+
+    def save(self, path):
+        with open(path, 'wb+') as f:
+            pickle.dump(self.model, f)
+
+    def load(self, path):
+        with open(path, 'rb') as f:
+            self.model = pickle.load(f)
+        return self
